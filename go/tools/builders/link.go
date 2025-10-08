@@ -50,6 +50,7 @@ func link(args []string) error {
 	buildmode := flags.String("buildmode", "", "Build mode used.")
 	flags.Var(&xdefs, "X", "A string variable to replace in the linked binary (repeated).")
 	flags.Var(&stamps, "stamp", "The name of a file with stamping values.")
+	buildinfoFile := flags.String("buildinfo", "", "Path to buildinfo dependency file for Go 1.18+ buildInfo.")
 	if err := flags.Parse(builderArgs); err != nil {
 		return err
 	}
@@ -90,8 +91,57 @@ func link(args []string) error {
 		}
 	}
 
+	// Parse buildinfo file if provided (for Go 1.18+ dependency metadata)
+	var deps []*Module
+	if *buildinfoFile != "" {
+		buildinfoData, err := ioutil.ReadFile(*buildinfoFile)
+		if err != nil {
+			return fmt.Errorf("Failed reading buildinfo file %s: %v", *buildinfoFile, err)
+		}
+
+		// Parse the buildinfo file to extract dependency information
+		// Format: tab-separated lines with "path", "dep", etc.
+		lines := strings.Split(string(buildinfoData), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			parts := strings.Split(line, "\t")
+			if len(parts) >= 3 && parts[0] == "dep" {
+				// Format: dep\t<importpath>\t<version>
+				deps = append(deps, &Module{
+					Path:    parts[1],
+					Version: parts[2],
+					Sum:     "", // No checksum in Bazel builds
+				})
+			}
+		}
+	}
+
+	// Prepare link config for buildinfo generation
+	var realBuildMode string
+	if *buildmode == "" {
+		realBuildMode = "exe"
+	} else {
+		realBuildMode = *buildmode
+	}
+
+	cgoEnabled := os.Getenv("CGO_ENABLED") == "1"
+	cfg := linkConfig{
+		path:           *packagePath,
+		buildMode:      realBuildMode,
+		compiler:       "gc",
+		cgoEnabled:     cgoEnabled,
+		goos:           os.Getenv("GOOS"),
+		goarch:         os.Getenv("GOARCH"),
+		pgoProfilePath: "",     // Will be set below if pgoprofile is provided
+		buildinfoFile:  *buildinfoFile,
+		deps:           deps,
+	}
+
 	// Build an importcfg file.
-	importcfgName, err := buildImportcfgFileForLink(archives, *packageList, goenv.installSuffix, filepath.Dir(*outFile))
+	importcfgName, err := buildImportcfgFileForLink(archives, *packageList, goenv.installSuffix, filepath.Dir(*outFile), cfg)
 	if err != nil {
 		return err
 	}

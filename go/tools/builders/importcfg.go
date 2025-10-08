@@ -23,6 +23,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -154,7 +155,20 @@ func buildImportcfgFileForCompile(imports map[string]*archive, installSuffix, di
 	return filename, nil
 }
 
-func buildImportcfgFileForLink(archives []archive, stdPackageListPath, installSuffix, dir string) (string, error) {
+// linkConfig contains parameters for generating buildinfo
+type linkConfig struct {
+	path            string
+	buildMode       string
+	compiler        string
+	cgoEnabled      bool
+	goarch          string
+	goos            string
+	pgoProfilePath  string
+	buildinfoFile   string
+	deps            []*Module
+}
+
+func buildImportcfgFileForLink(archives []archive, stdPackageListPath, installSuffix, dir string, cfg linkConfig) (string, error) {
 	buf := &bytes.Buffer{}
 	goroot, ok := os.LookupEnv("GOROOT")
 	if !ok {
@@ -196,6 +210,39 @@ package with this path is linked.`,
 		depsSeen[arc.packagePath] = arc.importPath
 		fmt.Fprintf(buf, "packagefile %s=%s\n", arc.packagePath, arc.file)
 	}
+
+	// Generate buildinfo if dependencies are provided
+	if cfg.deps != nil && len(cfg.deps) > 0 {
+		buildInfo := BuildInfo{
+			GoVersion: runtime.Version(),
+			Path:      cfg.path,
+			Main:      Module{},
+			Deps:      cfg.deps,
+			Settings:  []BuildSetting{},
+		}
+
+		buildSettingAppend := func(key, value string) {
+			if value != "" {
+				buildInfo.Settings = append(buildInfo.Settings, BuildSetting{Key: key, Value: value})
+			}
+		}
+
+		buildSettingAppend("-compiler", cfg.compiler)
+		buildSettingAppend("-buildmode", cfg.buildMode)
+		if cfg.pgoProfilePath != "" {
+			buildSettingAppend("-pgo", cfg.pgoProfilePath)
+		}
+		if cfg.cgoEnabled {
+			buildSettingAppend("CGO_ENABLED", "1")
+		} else {
+			buildSettingAppend("CGO_ENABLED", "0")
+		}
+		buildSettingAppend("GOOS", cfg.goos)
+		buildSettingAppend("GOARCH", cfg.goarch)
+
+		fmt.Fprintf(buf, "modinfo %q\n", ModInfoData(buildInfo.String()))
+	}
+
 	f, err := ioutil.TempFile(dir, "importcfg")
 	if err != nil {
 		return "", err
